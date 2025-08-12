@@ -17,14 +17,10 @@ public:
     client.onEvent([this](WebsocketsEvent ev, String data){ onEvent(ev, data); });
 
     if (!client.connect(WS_URL)){
-      ELog::error("WebSocket connect failed; restarting…");
       delay(1000);
       ESP.restart();
     }
     s.wsConnected = client.available();
-  #ifdef DEBUG
-    ELog::info("WebSocket connected");
-  #endif
   }
 
   void poll(){
@@ -40,7 +36,7 @@ public:
     return s.wsConnected;
   }
 
-  // --- Outbound messages ---
+  // --- Outbound messages (legacy field order) ---
   void sendBegin(const String& teamName, uint8_t teamType, int arucoId, int roomNum){
     StaticJsonDocument<JSON_DOC_SIZE> doc;
     doc["op"] = "begin";
@@ -48,8 +44,7 @@ public:
     doc["aruco"] = arucoId;
     doc["teamType"] = teamType;
     doc["room"] = roomNum;
-    String out;
-    serializeJson(doc, out);
+    String out; serializeJson(doc, out);
     sendJson(out);
   }
 
@@ -59,8 +54,7 @@ public:
     doc["teamName"] = teamName;
     doc["type"] = (int)type;
     doc["message"] = message;
-    String out;
-    serializeJson(doc, out);
+    String out; serializeJson(doc, out);
     sendJson(out);
   }
 
@@ -69,8 +63,7 @@ public:
     doc["op"] = "print";
     doc["teamName"] = teamName;
     doc["message"] = message;
-    String out;
-    serializeJson(doc, out);
+    String out; serializeJson(doc, out);
     sendJson(out);
   }
 
@@ -85,33 +78,55 @@ private:
     }
   }
 
+  // Parse exactly: {"op":"aruco","aruco":{"visible":bool,"x":float,"y":float,"theta":float}}
   void onMessage(WebsocketsMessage message){
-    StaticJsonDocument<300> doc;
+    StaticJsonDocument<384> doc;
     DeserializationError err = deserializeJson(doc, message.data());
     if (err) return;
 
     const char* op = doc["op"] | "";
     if (strcmp(op, "aruco") == 0){
-      s.aruco_visible = doc["aruco"]["visible"] | s.aruco_visible;
-      s.aruco_x       = doc["aruco"]["x"]       | s.aruco_x;
-      s.aruco_y       = doc["aruco"]["y"]       | s.aruco_y;
-      s.aruco_theta   = doc["aruco"]["theta"]   | s.aruco_theta;
-      s.newData = true;
-    } else if (strcmp(op, "info") == 0){
+      JsonObjectConst a = doc["aruco"].as<JsonObjectConst>();
+      if (a.isNull()) return;
+
+      // Read values; default to previous if any are missing
+      bool   vis   = a["visible"] | s.aruco_visible;
+      double x     = a["x"]       | s.aruco_x;
+      double y     = a["y"]       | s.aruco_y;
+      double theta = a["theta"]   | s.aruco_theta;
+
+      s.aruco_visible = vis;
+      s.aruco_x = x;
+      s.aruco_y = y;
+      s.aruco_theta = theta;
+      s.newData = true; // ensure Uno will fetch on next OP_CHECK
+
+      // Echo a minimal print back to the server so we can see what ESP parsed
+      // (helps confirm WS->ESP->Uno pipeline without needing serial logs)
+      StaticJsonDocument<192> echo;
+      echo["op"] = "print";
+      echo["teamName"] = s.teamName;
+      char msg[96];
+      // trim to ~2 decimals to keep message small
+      snprintf(msg, sizeof(msg), "rx aruco: vis=%d x=%.2f y=%.2f th=%.2f", vis ? 1 : 0, x, y, theta);
+      echo["message"] = msg;
+      String out; serializeJson(echo, out);
+      client.send(out);
+    }
+    else if (strcmp(op, "info") == 0){
       const char* loc = doc["mission_loc"] | "bottom";
-      const float x = 0.55f;
-      const float y = (strcmp(loc,"bottom")==0) ? 0.55f : 1.45f;
-      const float theta = 0.0f;
-      sendArucoFloatsToArduino(x,y,theta);
-    } else if (strcmp(op, "aruco_confirm") == 0){
+      const float xf = 0.55f;
+      const float yf = (strcmp(loc,"bottom")==0) ? 0.55f : 1.45f;
+      const float tf = 0.0f;
+      sendArucoFloatsToArduino(xf,yf,tf);
+    }
+    else if (strcmp(op, "aruco_confirm") == 0){
       s.arucoConfirmed = true;
     }
   }
 
   void sendArucoFloatsToArduino(float x, float y, float theta){
     union { float f; uint8_t b[4]; } f;
-    // We send these over HW Serial; Uno isn't expecting these unless it's wired there.
-    // (This path mirrors the old firmware behavior.)
     Serial.write(0x05); Serial.flush();
     f.f = x;     Serial.write(f.b, 4); Serial.flush();
     f.f = y;     Serial.write(f.b, 4); Serial.flush();
