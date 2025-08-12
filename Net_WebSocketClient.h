@@ -79,6 +79,7 @@ private:
   }
 
   // Parse exactly: {"op":"aruco","aruco":{"visible":bool,"x":float,"y":float,"theta":float}}
+  // Fallback: if visible==false but x/y/theta are valid (!=-1), treat as visible.
   void onMessage(WebsocketsMessage message){
     StaticJsonDocument<384> doc;
     DeserializationError err = deserializeJson(doc, message.data());
@@ -89,29 +90,25 @@ private:
       JsonObjectConst a = doc["aruco"].as<JsonObjectConst>();
       if (a.isNull()) return;
 
-      // Read values; default to previous if any are missing
       bool   vis   = a["visible"] | s.aruco_visible;
       double x     = a["x"]       | s.aruco_x;
       double y     = a["y"]       | s.aruco_y;
       double theta = a["theta"]   | s.aruco_theta;
 
+      bool coordsLookValid = (x != -1.0) && (y != -1.0) && (theta != -1.0);
+      if (!vis && coordsLookValid) vis = true;
+
+      bool changed = (vis != s.aruco_visible) ||
+                     (x   != s.aruco_x)       ||
+                     (y   != s.aruco_y)       ||
+                     (theta != s.aruco_theta);
+
       s.aruco_visible = vis;
       s.aruco_x = x;
       s.aruco_y = y;
       s.aruco_theta = theta;
-      s.newData = true; // ensure Uno will fetch on next OP_CHECK
 
-      // Echo a minimal print back to the server so we can see what ESP parsed
-      // (helps confirm WS->ESP->Uno pipeline without needing serial logs)
-      StaticJsonDocument<192> echo;
-      echo["op"] = "print";
-      echo["teamName"] = s.teamName;
-      char msg[96];
-      // trim to ~2 decimals to keep message small
-      snprintf(msg, sizeof(msg), "rx aruco: vis=%d x=%.2f y=%.2f th=%.2f", vis ? 1 : 0, x, y, theta);
-      echo["message"] = msg;
-      String out; serializeJson(echo, out);
-      client.send(out);
+      if (changed) s.newData = true; // only flag when something actually changed
     }
     else if (strcmp(op, "info") == 0){
       const char* loc = doc["mission_loc"] | "bottom";
